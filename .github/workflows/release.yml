@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+
+  release:
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Preflight release checks
+        id: preflight
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          node <<'NODE'
+          const { execSync } = require('node:child_process');
+          const fs = require('node:fs');
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const tokenPresent = Boolean(process.env.NPM_TOKEN);
+          const refType = process.env.GITHUB_REF_TYPE || '';
+          const refName = process.env.GITHUB_REF_NAME || '';
+          const expectedTag = `v${pkg.version}`;
+          const tagMatches = refType !== 'tag' || refName === expectedTag;
+
+          let versionExists = false;
+          try {
+            const result = execSync(`npm view ${pkg.name}@${pkg.version} version --json`, {
+              stdio: ['ignore', 'pipe', 'ignore'],
+              encoding: 'utf8',
+            }).trim();
+            versionExists = Boolean(result) && result !== 'null';
+          } catch {
+            versionExists = false;
+          }
+
+          const shouldPublish = tokenPresent && !versionExists && tagMatches;
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `package_name=${pkg.name}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `package_version=${pkg.version}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `token_present=${tokenPresent}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version_exists=${versionExists}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag_matches=${tagMatches}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `should_publish=${shouldPublish}\n`);
+          NODE
+
+      - name: Install dependencies
+        if: steps.preflight.outputs.should_publish == 'true'
+        id: install
+        run: npm ci
+
+      - name: Build package
+        if: steps.preflight.outputs.should_publish == 'true'
+        id: build
+        run: npm run build
+
+      - name: Publish to npm
+        if: steps.preflight.outputs.should_publish == 'true'
+        id: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Write release summary
+        if: always()
+        run: |
+          {
+            echo "## Release Summary"
+            echo
+            echo "- Ref: \`${GITHUB_REF_NAME}\`"
+            echo "- Package: \`${{ steps.preflight.outputs.package_name }}\`"
+            echo "- Version: \`${{ steps.preflight.outputs.package_version }}\`"
+            echo "- NPM token present: \`${{ steps.preflight.outputs.token_present }}\`"
+            echo "- Version already exists on npm: \`${{ steps.preflight.outputs.version_exists }}\`"
+            echo "- Tag matches package version: \`${{ steps.preflight.outputs.tag_matches }}\`"
+            echo "- Publish attempted: \`${{ steps.preflight.outputs.should_publish }}\`"
+            echo "- Install: \`${{ steps.install.outcome || 'skipped' }}\`"
+            echo "- Build: \`${{ steps.build.outcome || 'skipped' }}\`"
+            echo "- Publish: \`${{ steps.publish.outcome || 'skipped' }}\`"
+            echo
+            if [ "${{ steps.preflight.outputs.token_present }}" != "true" ]; then
+              echo "> Release skipped: \`NPM_TOKEN\` is not configured."
+            elif [ "${{ steps.preflight.outputs.version_exists }}" = "true" ]; then
+              echo "> Release skipped: package version already exists on npm."
+            elif [ "${{ steps.preflight.outputs.tag_matches }}" != "true" ]; then
+              echo "> Release skipped: git tag does not match \`package.json\` version."
+            elif [ "${{ steps.publish.outcome }}" = "success" ]; then
+              echo "> Release published successfully."
+            else
+              echo "> Release was not published."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

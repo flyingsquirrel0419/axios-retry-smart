@@ -1,0 +1,54 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        id: setup
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        id: install
+        run: npm ci
+
+      - name: Run lint
+        id: lint
+        run: npm run lint
+
+      - name: Run tests
+        id: test
+        run: npm run test
+
+      - name: Run build
+        id: build
+        run: npm run build
+
+      - name: Write validation summary
+        if: always()
+        run: |
+          {
+            echo "## Validation Summary"
+            echo
+            echo "- Ref: \`${GITHUB_REF_NAME}\`"
+            echo "- Node.js: \`20\`"
+            echo "- Install: \`${{ steps.install.outcome }}\`"
+            echo "- Lint: \`${{ steps.lint.outcome }}\`"
+            echo "- Test: \`${{ steps.test.outcome }}\`"
+            echo "- Build: \`${{ steps.build.outcome }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
