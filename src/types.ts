@@ -1,6 +1,12 @@
 import type { AxiosError, AxiosInstance, AxiosRequestConfig } from 'axios'
 
-import type { CircuitBreakerSnapshot, CircuitState } from './circuitBreaker/types'
+import type {
+  CircuitBreakerMode,
+  CircuitBreakerRequestDecision,
+  CircuitBreakerSnapshot,
+  CircuitState,
+  CircuitTransition,
+} from './circuitBreaker/types'
 
 export type RetryStrategy =
   | 'fixed'
@@ -45,7 +51,12 @@ export interface CircuitBreakerOptions {
   timeout: number
   volumeThreshold: number
   ttl: number
+  mode: CircuitBreakerMode
+  rollingWindowMs: number
+  errorRateThreshold: number
 }
+
+export type CircuitKeyStrategy = 'path' | 'origin'
 
 export type CircuitBreakerKeyResolver = (
   config: AxiosRequestConfig,
@@ -64,6 +75,16 @@ export interface SmartRetryMetricsSnapshot {
 export interface SmartRetryMetrics {
   snapshot(): SmartRetryMetricsSnapshot
   toPrometheus(): string
+}
+
+export type SmartRetryMetricName = keyof SmartRetryMetricsSnapshot
+
+export interface SmartRetryMetricsSink {
+  increment(metric: SmartRetryMetricName, value?: number): void
+}
+
+export interface SmartRetryMetricsOptions {
+  sinks?: SmartRetryMetricsSink[]
 }
 
 export interface SmartRetryHooks {
@@ -87,10 +108,32 @@ export interface SmartRetryHooks {
   ) => void
 }
 
+export interface CircuitBreakerController {
+  updateOptions(options: CircuitBreakerOptions): void
+  beforeRequest(countRequest?: boolean, now?: number): CircuitBreakerRequestDecision
+  recordSuccess(now?: number): CircuitTransition | undefined
+  recordFailure(now?: number): CircuitTransition | undefined
+  reset(now?: number): CircuitTransition | undefined
+  snapshot(now?: number): CircuitBreakerSnapshot
+}
+
+export interface SmartRetryCircuitStore {
+  getOrCreate(
+    key: string,
+    options?: CircuitBreakerOptions,
+    now?: number,
+  ): CircuitBreakerController
+  getSnapshot(key: string, now?: number): CircuitBreakerSnapshot | undefined
+  reset(key: string, now?: number): void
+}
+
 export interface SmartRetryOptions {
   retry?: Partial<RetryOptions>
   circuitBreaker?: Partial<CircuitBreakerOptions> | false
+  circuitBreakerStore?: SmartRetryCircuitStore
   circuitKeyResolver?: CircuitBreakerKeyResolver
+  circuitKeyStrategy?: CircuitKeyStrategy
+  metrics?: SmartRetryMetricsOptions
   hooks?: SmartRetryHooks
   debug?: boolean | SmartRetryLogger
 }
@@ -115,5 +158,6 @@ declare module 'axios' {
     retryConfig?: Partial<RetryOptions> | false
     circuitBreakerConfig?: Partial<CircuitBreakerOptions> | false
     circuitKeyResolver?: CircuitBreakerKeyResolver
+    circuitKeyStrategy?: CircuitKeyStrategy
   }
 }

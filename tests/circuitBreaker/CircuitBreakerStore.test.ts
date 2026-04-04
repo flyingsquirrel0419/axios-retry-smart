@@ -9,6 +9,9 @@ describe('CircuitBreakerStore', () => {
       timeout: 10,
       volumeThreshold: 1,
       ttl: 100,
+      mode: 'consecutive',
+      rollingWindowMs: 1_000,
+      errorRateThreshold: 0.5,
     })
 
     store.getOrCreate(
@@ -18,6 +21,9 @@ describe('CircuitBreakerStore', () => {
         timeout: 10,
         volumeThreshold: 1,
         ttl: 10,
+        mode: 'consecutive',
+        rollingWindowMs: 1_000,
+        errorRateThreshold: 0.5,
       },
       0,
     )
@@ -28,6 +34,9 @@ describe('CircuitBreakerStore', () => {
         timeout: 10,
         volumeThreshold: 1,
         ttl: 100,
+        mode: 'consecutive',
+        rollingWindowMs: 1_000,
+        errorRateThreshold: 0.5,
       },
       0,
     )

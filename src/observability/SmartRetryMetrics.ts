@@ -1,4 +1,9 @@
-import type { SmartRetryMetrics, SmartRetryMetricsSnapshot } from '../types'
+import type {
+  SmartRetryMetricName,
+  SmartRetryMetrics,
+  SmartRetryMetricsSink,
+  SmartRetryMetricsSnapshot,
+} from '../types'
 
 const INITIAL_SNAPSHOT: SmartRetryMetricsSnapshot = {
   requestAttempts: 0,
@@ -10,35 +15,68 @@ const INITIAL_SNAPSHOT: SmartRetryMetricsSnapshot = {
   circuitCloses: 0,
 }
 
+export const SMART_RETRY_PROMETHEUS_METRICS = {
+  requestAttempts: {
+    name: 'smart_retry_request_attempts_total',
+    help: 'Total outbound request attempts.',
+  },
+  retries: {
+    name: 'smart_retry_retries_total',
+    help: 'Total retries scheduled by the client.',
+  },
+  successes: {
+    name: 'smart_retry_successes_total',
+    help: 'Total successful responses.',
+  },
+  failures: {
+    name: 'smart_retry_failures_total',
+    help: 'Total terminal failures.',
+  },
+  shortCircuits: {
+    name: 'smart_retry_short_circuits_total',
+    help: 'Total requests rejected because a circuit was open.',
+  },
+  circuitOpens: {
+    name: 'smart_retry_circuit_opens_total',
+    help: 'Total circuit open transitions.',
+  },
+  circuitCloses: {
+    name: 'smart_retry_circuit_closes_total',
+    help: 'Total circuit close transitions.',
+  },
+} satisfies Record<SmartRetryMetricName, { name: string; help: string }>
+
 export class SmartRetryMetricsRegistry implements SmartRetryMetrics {
   private snapshotState: SmartRetryMetricsSnapshot = { ...INITIAL_SNAPSHOT }
 
+  constructor(private readonly sinks: SmartRetryMetricsSink[] = []) {}
+
   recordRequestAttempt(): void {
-    this.snapshotState.requestAttempts += 1
+    this.increment('requestAttempts')
   }
 
   recordRetry(): void {
-    this.snapshotState.retries += 1
+    this.increment('retries')
   }
 
   recordSuccess(): void {
-    this.snapshotState.successes += 1
+    this.increment('successes')
   }
 
   recordFailure(): void {
-    this.snapshotState.failures += 1
+    this.increment('failures')
   }
 
   recordShortCircuit(): void {
-    this.snapshotState.shortCircuits += 1
+    this.increment('shortCircuits')
   }
 
   recordCircuitOpen(): void {
-    this.snapshotState.circuitOpens += 1
+    this.increment('circuitOpens')
   }
 
   recordCircuitClose(): void {
-    this.snapshotState.circuitCloses += 1
+    this.increment('circuitCloses')
   }
 
   snapshot(): SmartRetryMetricsSnapshot {
@@ -47,28 +85,22 @@ export class SmartRetryMetricsRegistry implements SmartRetryMetrics {
 
   toPrometheus(): string {
     const snapshot = this.snapshot()
-    return [
-      '# HELP smart_retry_request_attempts_total Total outbound request attempts.',
-      '# TYPE smart_retry_request_attempts_total counter',
-      `smart_retry_request_attempts_total ${snapshot.requestAttempts}`,
-      '# HELP smart_retry_retries_total Total retries scheduled by the client.',
-      '# TYPE smart_retry_retries_total counter',
-      `smart_retry_retries_total ${snapshot.retries}`,
-      '# HELP smart_retry_successes_total Total successful responses.',
-      '# TYPE smart_retry_successes_total counter',
-      `smart_retry_successes_total ${snapshot.successes}`,
-      '# HELP smart_retry_failures_total Total terminal failures.',
-      '# TYPE smart_retry_failures_total counter',
-      `smart_retry_failures_total ${snapshot.failures}`,
-      '# HELP smart_retry_short_circuits_total Total requests rejected because a circuit was open.',
-      '# TYPE smart_retry_short_circuits_total counter',
-      `smart_retry_short_circuits_total ${snapshot.shortCircuits}`,
-      '# HELP smart_retry_circuit_opens_total Total circuit open transitions.',
-      '# TYPE smart_retry_circuit_opens_total counter',
-      `smart_retry_circuit_opens_total ${snapshot.circuitOpens}`,
-      '# HELP smart_retry_circuit_closes_total Total circuit close transitions.',
-      '# TYPE smart_retry_circuit_closes_total counter',
-      `smart_retry_circuit_closes_total ${snapshot.circuitCloses}`,
-    ].join('\n')
+    return (Object.keys(SMART_RETRY_PROMETHEUS_METRICS) as SmartRetryMetricName[])
+      .flatMap((metricName) => {
+        const metric = SMART_RETRY_PROMETHEUS_METRICS[metricName]
+        return [
+          `# HELP ${metric.name} ${metric.help}`,
+          `# TYPE ${metric.name} counter`,
+          `${metric.name} ${snapshot[metricName]}`,
+        ]
+      })
+      .join('\n')
+  }
+
+  private increment(metricName: SmartRetryMetricName, value = 1): void {
+    this.snapshotState[metricName] += value
+    for (const sink of this.sinks) {
+      sink.increment(metricName, value)
+    }
   }
 }

@@ -14,6 +14,7 @@ import { resolveRetryDelay } from './strategies'
 import type {
   CircuitBreakerOptions,
   CircuitBreakerKeyResolver,
+  CircuitKeyStrategy,
   RetryOptions,
   SmartRetryAxiosInstance,
   SmartRetryLogLevel,
@@ -45,6 +46,9 @@ const DEFAULT_CIRCUIT_OPTIONS: CircuitBreakerOptions = {
   timeout: 30_000,
   volumeThreshold: 10,
   ttl: 5 * 60_000,
+  mode: 'consecutive',
+  rollingWindowMs: 60_000,
+  errorRateThreshold: 0.5,
 }
 
 const DEBUG_PATTERN = 'axios-retry-smart'
@@ -69,8 +73,10 @@ export function withSmartRetry(
 ): SmartRetryAxiosInstance {
   const retryDefaults = resolveRetryOptions(options.retry)
   const circuitDefaults = resolveCircuitBreakerOptions(options.circuitBreaker)
-  const store = circuitDefaults ? new CircuitBreakerStore(circuitDefaults) : undefined
-  const metrics = new SmartRetryMetricsRegistry()
+  const store =
+    options.circuitBreakerStore ??
+    (circuitDefaults ? new CircuitBreakerStore(circuitDefaults) : undefined)
+  const metrics = new SmartRetryMetricsRegistry(options.metrics?.sinks ?? [])
   const logger = createLogger(options.debug)
   let requestSequence = 0
 
@@ -86,7 +92,11 @@ export function withSmartRetry(
     meta.resolvedCircuitBreakerOptions = circuitOptions
     meta.isHalfOpenProbe = false
     meta.circuitKey = circuitOptions
-      ? resolveCircuitKey(config, options.circuitKeyResolver)
+      ? resolveCircuitKey(
+          config,
+          options.circuitKeyResolver,
+          config.circuitKeyStrategy ?? options.circuitKeyStrategy ?? 'path',
+        )
       : undefined
     setMeta(config, meta)
 
@@ -232,9 +242,7 @@ export function withSmartRetry(
   function emitCircuitTransition(
     key: string,
     transition: CircuitTransition | undefined,
-    snapshot: ReturnType<CircuitBreakerStore['getSnapshot']> extends infer T
-      ? NonNullable<T>
-      : never,
+    snapshot: NonNullable<ReturnType<SmartRetryAxiosInstance['getCircuitBreaker']>>,
   ): void {
     if (!transition) {
       return
@@ -331,6 +339,7 @@ function resolveDelayWithRetryAfter(
 function resolveCircuitKey(
   config: AxiosRequestConfig,
   fallbackResolver?: CircuitBreakerKeyResolver,
+  strategy: CircuitKeyStrategy = 'path',
 ): string | undefined {
   const resolver = config.circuitKeyResolver ?? fallbackResolver
   if (resolver) {
@@ -346,7 +355,7 @@ function resolveCircuitKey(
     const url = config.baseURL
       ? new URL(candidateUrl, config.baseURL)
       : new URL(candidateUrl)
-    return url.origin
+    return strategy === 'origin' ? url.origin : `${url.origin}${url.pathname}`
   } catch {
     return config.baseURL ? new URL(config.baseURL).origin : candidateUrl
   }

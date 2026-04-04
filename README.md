@@ -1,6 +1,6 @@
 # axios-retry-smart
 
-> Production-ready retry + circuit breaker for Axios — exponential backoff, jitter, and Prometheus metrics in one wrapper.
+> Axios retry + circuit breaker wrapper with backoff, jitter, Retry-After support, and Prometheus-style metrics.
 
 [![npm version](https://img.shields.io/npm/v/axios-retry-smart.svg)](https://www.npmjs.com/package/axios-retry-smart)
 [![npm downloads](https://img.shields.io/npm/dw/axios-retry-smart.svg)](https://www.npmjs.com/package/axios-retry-smart)
@@ -14,7 +14,7 @@
 
 `axios-retry` handles retries. `opossum` handles circuit breaking. Composing them with Axios yourself means writing glue code, testing glue code, and debugging glue code at 3am.
 
-`axios-retry-smart` does both — with AWS-style jitter to prevent thundering herd, a real CLOSED → OPEN → HALF_OPEN state machine, Retry-After header support, and built-in Prometheus metrics. Drop it in, get production-grade resilience on day one.
+`axios-retry-smart` combines both in one Axios-first wrapper. It ships AWS-style jitter, a real CLOSED → OPEN → HALF_OPEN state machine, Retry-After support, and metrics export without forcing you to build the integration layer yourself.
 
 ---
 
@@ -53,6 +53,19 @@ const { data } = await client.get('/users/123')
 ```
 
 That's it. No middleware. No extra wrappers. Same Axios API you already know.
+
+---
+
+## Current scope
+
+`axios-retry-smart` is a focused HTTP client utility, not a full distributed resilience platform.
+
+- the default store is in-memory and scoped to a single Node process or browser tab, but you can inject a custom `circuitBreakerStore` for shared coordination
+- breaker policy can be either consecutive-failure based or rolling-window error-rate based
+- the default breaker key is request path, and you can switch back to origin-level grouping or provide a custom resolver
+- metrics export includes Prometheus-style text and an optional `prom-client` sink bridge
+
+For side projects, small services, or teams that want one Axios integration point for retry plus circuit breaking, that scope is often enough. For shared breaker state, cross-instance coordination, or stricter production policies, plug in your own store and validate the policy you choose.
 
 ---
 
@@ -108,14 +121,17 @@ The breaker is an explicit state machine: **CLOSED → OPEN → HALF_OPEN → CL
     ←──────────────── probe fails ─────────────────── back to OPEN
 ```
 
-Breakers are scoped by **origin** by default (`https://api.example.com`). Customize the key if you need path-level isolation:
+Breakers are scoped by **path** by default (`https://api.example.com/users`). Switch to origin-level grouping or customize the key if your API needs a different boundary:
 
 ```ts
 const client = withSmartRetry(axios.create(), {
-  // Path-level isolation — /slow and /health don't share a breaker
+  circuitKeyStrategy: 'origin',
+})
+
+const pathIsolatedClient = withSmartRetry(axios.create(), {
   circuitKeyResolver: (config) => {
     const url = new URL(config.url!, config.baseURL)
-    return `${url.origin}${url.pathname}`
+    return `${url.origin}/tenant/${url.searchParams.get('tenantId') ?? 'default'}`
   },
 })
 ```
@@ -123,12 +139,65 @@ const client = withSmartRetry(axios.create(), {
 Inspect or reset at runtime:
 
 ```ts
-client.getCircuitBreaker('https://api.example.com')
+client.getCircuitBreaker('https://api.example.com/users')
 // → { state: 'OPEN', failureCount: 5, nextAttemptAt: 1712345678000, ... }
 
-client.resetCircuitBreaker('https://api.example.com')
+client.resetCircuitBreaker('https://api.example.com/users')
 // manual reset after a deploy
 ```
+
+### Breaker modes
+
+```ts
+// Default: open after consecutive failures once enough volume has been seen
+{
+  circuitBreaker: {
+    mode: 'consecutive',
+    threshold: 5,
+    volumeThreshold: 10,
+  },
+}
+
+// Rolling window: open when the failure rate stays above a threshold
+{
+  circuitBreaker: {
+    mode: 'error-rate',
+    volumeThreshold: 20,
+    errorRateThreshold: 0.3,
+    rollingWindowMs: 60_000,
+    timeout: 30_000,
+  },
+}
+```
+
+### Shared breaker state
+
+```ts
+import axios from 'axios'
+import {
+  StorageBackedCircuitBreakerStore,
+  withSmartRetry,
+} from 'axios-retry-smart'
+
+const circuitStore = new StorageBackedCircuitBreakerStore(
+  {
+    threshold: 5,
+    timeout: 30_000,
+    volumeThreshold: 10,
+    ttl: 300_000,
+    mode: 'consecutive',
+    rollingWindowMs: 60_000,
+    errorRateThreshold: 0.5,
+  },
+  window.localStorage,
+)
+
+const client = withSmartRetry(axios.create(), {
+  circuitBreakerStore: circuitStore,
+})
+```
+
+`StorageBackedCircuitBreakerStore` is useful for same-origin browser tabs via `localStorage` or `sessionStorage`. On the server, inject your own `circuitBreakerStore` if you need process-wide or multi-instance coordination.
 
 ---
 
@@ -205,6 +274,22 @@ const snap = client.getMetricsSnapshot()
 // { requestAttempts, retries, successes, failures, shortCircuits, circuitOpens, circuitCloses }
 ```
 
+```ts
+import axios from 'axios'
+import { Counter, Registry } from 'prom-client'
+import {
+  createPromClientMetricsSink,
+  withSmartRetry,
+} from 'axios-retry-smart'
+
+const registry = new Registry()
+const client = withSmartRetry(axios.create(), {
+  metrics: {
+    sinks: [createPromClientMetricsSink({ Counter }, { registry, prefix: 'app_' })],
+  },
+})
+```
+
 ---
 
 ## Full option reference
@@ -227,13 +312,22 @@ withSmartRetry(axiosInstance, {
   },
 
   circuitBreaker: {
-    threshold: 5,           // consecutive failures before opening
+    threshold: 5,           // used by consecutive mode
     timeout: 30_000,        // ms before trying a probe request
     volumeThreshold: 10,    // minimum requests before the breaker can open
     ttl: 300_000,           // idle breaker cleanup time in ms
+    mode: 'consecutive',    // or 'error-rate'
+    rollingWindowMs: 60_000,
+    errorRateThreshold: 0.5,
   },
 
+  circuitBreakerStore,                                       // optional shared store implementation
+  circuitKeyStrategy: 'path',                                // 'path' (default) or 'origin'
   circuitKeyResolver: (config) => string | undefined,  // custom breaker key
+
+  metrics: {
+    sinks: [createPromClientMetricsSink({ Counter }, { registry })],
+  },
 
   hooks: {
     onRetry, onCircuitOpen, onCircuitClose, onCircuitStateChange, onGiveUp,
@@ -249,9 +343,10 @@ withSmartRetry(axiosInstance, {
 
 - `POST` is **not** retried by default — most POST endpoints are non-idempotent. Enable it per-request with `retryMethods: ['post']`.
 - `DELETE` **is** retried by default — most REST APIs treat it as idempotent. Override if your API does not.
-- Circuit breakers are keyed by **origin** by default. Failures on `/slow` can open the breaker for `/health` unless you set `circuitKeyResolver`.
+- Circuit breakers are keyed by **path** by default. Set `circuitKeyStrategy: 'origin'` if you want `/slow` and `/health` to share a breaker.
 - `jitterFactor: 1` means Full Jitter `[0, cap)`. Lower values narrow the range toward the cap.
-- The breaker counts **consecutive failures** since the last successful close or reset — not a sliding window. This is simpler and predictable but means a recovery resets the count.
+- `mode: 'consecutive'` counts failures since the last successful close or reset.
+- `mode: 'error-rate'` evaluates recent outcomes within `rollingWindowMs` and opens when `failureRate >= errorRateThreshold`.
 
 ---
 
@@ -278,7 +373,7 @@ withSmartRetry(axiosInstance, {
 
 ## Browser support
 
-Works in browsers — breaker state is in-memory, per page lifecycle, and resets on reload. There is no built-in cross-tab sync; if you need shared breaker state across tabs, wrap `circuitKeyResolver` with your own coordination layer (SharedWorker, BroadcastChannel).
+Works in browsers. The default breaker store is in-memory, per page lifecycle, and resets on reload. For same-origin tab sharing, use `StorageBackedCircuitBreakerStore` with `localStorage` or `sessionStorage`.
 
 ---
 

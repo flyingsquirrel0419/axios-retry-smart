@@ -1,6 +1,6 @@
 import { CircuitBreaker } from './CircuitBreaker'
 import type { CircuitBreakerSnapshot } from './types'
-import type { CircuitBreakerOptions } from '../types'
+import type { CircuitBreakerOptions, SmartRetryCircuitStore } from '../types'
 
 interface CircuitBreakerEntry {
   breaker: CircuitBreaker
@@ -8,7 +8,7 @@ interface CircuitBreakerEntry {
   ttl: number
 }
 
-export class CircuitBreakerStore {
+export class CircuitBreakerStore implements SmartRetryCircuitStore {
   private readonly entries = new Map<string, CircuitBreakerEntry>()
   private nextCleanupAt = 0
 
@@ -41,8 +41,8 @@ export class CircuitBreakerStore {
     return this.entries.get(key)?.breaker.snapshot()
   }
 
-  reset(key: string): void {
-    this.entries.get(key)?.breaker.reset()
+  reset(key: string, now = Date.now()): void {
+    this.entries.get(key)?.breaker.reset(now)
   }
 
   snapshots(now = Date.now()): Record<string, CircuitBreakerSnapshot> {

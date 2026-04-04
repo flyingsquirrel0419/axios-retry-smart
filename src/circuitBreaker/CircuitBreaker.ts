@@ -2,6 +2,8 @@ import type { CircuitBreakerOptions } from '../types'
 import type {
   CircuitBreakerRequestDecision,
   CircuitBreakerSnapshot,
+  CircuitBreakerStateData,
+  CircuitBreakerOutcome,
   CircuitState,
   CircuitTransition,
 } from './types'
@@ -14,15 +16,32 @@ export class CircuitBreaker {
   private nextAttemptAt: number | null = null
   private updatedAt = Date.now()
   private halfOpenProbeInFlight = false
+  private outcomes: CircuitBreakerOutcome[] = []
 
-  constructor(private options: CircuitBreakerOptions) {}
+  constructor(
+    private options: CircuitBreakerOptions,
+    state?: CircuitBreakerStateData,
+  ) {
+    if (state) {
+      this.state = state.state
+      this.failureCount = state.failureCount
+      this.requestCount = state.requestCount
+      this.lastFailureTime = state.lastFailureTime
+      this.nextAttemptAt = state.nextAttemptAt
+      this.updatedAt = state.updatedAt
+      this.halfOpenProbeInFlight = state.halfOpenProbeInFlight
+      this.outcomes = [...state.outcomes]
+    }
+  }
 
   updateOptions(options: CircuitBreakerOptions): void {
     this.options = options
+    this.pruneOutcomes(Date.now())
   }
 
   beforeRequest(countRequest = true, now = Date.now()): CircuitBreakerRequestDecision {
     this.updatedAt = now
+    this.pruneOutcomes(now)
 
     if (this.state === 'OPEN') {
       const canTransition =
@@ -57,6 +76,7 @@ export class CircuitBreaker {
 
   recordSuccess(now = Date.now()): CircuitTransition | undefined {
     this.updatedAt = now
+    this.recordOutcome(true, now)
     this.failureCount = 0
     this.halfOpenProbeInFlight = false
 
@@ -70,6 +90,7 @@ export class CircuitBreaker {
   recordFailure(now = Date.now()): CircuitTransition | undefined {
     this.updatedAt = now
     this.lastFailureTime = now
+    this.recordOutcome(false, now)
 
     if (this.state === 'HALF_OPEN') {
       this.halfOpenProbeInFlight = false
@@ -78,11 +99,7 @@ export class CircuitBreaker {
 
     this.failureCount += 1
 
-    if (this.requestCount < this.options.volumeThreshold) {
-      return undefined
-    }
-
-    if (this.failureCount >= this.options.threshold) {
+    if (this.shouldOpen(now)) {
       return this.transitionTo('OPEN', now)
     }
 
@@ -96,6 +113,7 @@ export class CircuitBreaker {
     this.lastFailureTime = null
     this.nextAttemptAt = null
     this.halfOpenProbeInFlight = false
+    this.outcomes = []
 
     if (this.state !== 'CLOSED') {
       return this.transitionTo('CLOSED', now)
@@ -104,7 +122,27 @@ export class CircuitBreaker {
     return undefined
   }
 
-  snapshot(): CircuitBreakerSnapshot {
+  snapshot(now = Date.now()): CircuitBreakerSnapshot {
+    const window = this.getWindowStats(now)
+
+    return {
+      state: this.state,
+      mode: this.options.mode,
+      failureCount: this.failureCount,
+      consecutiveFailureCount: this.failureCount,
+      requestCount: this.requestCount,
+      windowRequestCount: window.requestCount,
+      windowFailureCount: window.failureCount,
+      failureRate: window.failureRate,
+      lastFailureTime: this.lastFailureTime,
+      nextAttemptAt: this.nextAttemptAt,
+      updatedAt: this.updatedAt,
+    }
+  }
+
+  serialize(now = Date.now()): CircuitBreakerStateData {
+    this.pruneOutcomes(now)
+
     return {
       state: this.state,
       failureCount: this.failureCount,
@@ -112,6 +150,8 @@ export class CircuitBreaker {
       lastFailureTime: this.lastFailureTime,
       nextAttemptAt: this.nextAttemptAt,
       updatedAt: this.updatedAt,
+      halfOpenProbeInFlight: this.halfOpenProbeInFlight,
+      outcomes: [...this.outcomes],
     }
   }
 
@@ -168,8 +208,57 @@ export class CircuitBreaker {
       this.halfOpenProbeInFlight = false
       this.requestCount = 0
       this.failureCount = 0
+      this.outcomes = []
     }
 
     return transition
+  }
+
+  private shouldOpen(now: number): boolean {
+    if (this.options.mode === 'error-rate') {
+      const window = this.getWindowStats(now)
+      if (window.requestCount < this.options.volumeThreshold) {
+        return false
+      }
+
+      return (
+        window.failureRate !== null &&
+        window.failureRate >= this.options.errorRateThreshold
+      )
+    }
+
+    if (this.requestCount < this.options.volumeThreshold) {
+      return false
+    }
+
+    return this.failureCount >= this.options.threshold
+  }
+
+  private recordOutcome(success: boolean, now: number): void {
+    this.outcomes.push({ timestamp: now, success })
+    this.pruneOutcomes(now)
+  }
+
+  private pruneOutcomes(now: number): void {
+    const windowStart = now - this.options.rollingWindowMs
+    this.outcomes = this.outcomes.filter((entry) => entry.timestamp >= windowStart)
+  }
+
+  private getWindowStats(now: number): {
+    requestCount: number
+    failureCount: number
+    failureRate: number | null
+  } {
+    this.pruneOutcomes(now)
+    const requestCount = this.outcomes.length
+    const failureCount = this.outcomes.reduce((count, entry) => {
+      return entry.success ? count : count + 1
+    }, 0)
+
+    return {
+      requestCount,
+      failureCount,
+      failureRate: requestCount === 0 ? null : failureCount / requestCount,
+    }
   }
 }

@@ -79,8 +79,8 @@ describe('withSmartRetry integration', () => {
       CircuitBreakerOpenError,
     )
 
-    expect(opens).toEqual(['https://api.example.com'])
-    expect(client.getCircuitBreaker('https://api.example.com')?.state).toBe('OPEN')
+    expect(opens).toEqual(['https://api.example.com/data'])
+    expect(client.getCircuitBreaker('https://api.example.com/data')?.state).toBe('OPEN')
     expect(client.getMetricsSnapshot().shortCircuits).toBe(1)
   })
 
@@ -106,8 +106,8 @@ describe('withSmartRetry integration', () => {
     const response = await client.get('https://api.example.com/data')
 
     expect(response.status).toBe(200)
-    expect(client.getCircuitBreaker('https://api.example.com')?.state).toBe('CLOSED')
-    expect(closed).toEqual(['https://api.example.com'])
+    expect(client.getCircuitBreaker('https://api.example.com/data')?.state).toBe('CLOSED')
+    expect(closed).toEqual(['https://api.example.com/data'])
   })
 
   it('applies per-request circuit breaker overrides to an existing endpoint', async () => {
@@ -143,11 +143,11 @@ describe('withSmartRetry integration', () => {
       await client.get('https://api.example.com/threshold').catch(() => undefined)
     }
 
-    expect(client.getCircuitBreaker('https://api.example.com')?.state).toBe('CLOSED')
+    expect(client.getCircuitBreaker('https://api.example.com/threshold')?.state).toBe('CLOSED')
 
     await client.get('https://api.example.com/threshold').catch(() => undefined)
 
-    expect(client.getCircuitBreaker('https://api.example.com')?.state).toBe('OPEN')
+    expect(client.getCircuitBreaker('https://api.example.com/threshold')?.state).toBe('OPEN')
   })
 
   it('uses Retry-After header when present', async () => {
@@ -330,6 +330,49 @@ describe('withSmartRetry integration', () => {
     )
   })
 
+  it('isolates circuits by path by default', async () => {
+    nock('https://api.example.com')
+      .get('/slow')
+      .reply(500, { ok: false })
+      .get('/health')
+      .reply(200, { ok: true })
+
+    const client = withSmartRetry(axios.create(), {
+      retry: { attempts: 0, strategy: 'fixed', baseDelay: 1 },
+      circuitBreaker: { threshold: 1, timeout: 500, volumeThreshold: 1 },
+    })
+
+    await client.get('https://api.example.com/slow').catch(() => undefined)
+    const response = await client.get('https://api.example.com/health')
+
+    expect(response.status).toBe(200)
+    expect(client.getCircuitBreaker('https://api.example.com/slow')?.state).toBe('OPEN')
+    expect(client.getCircuitBreaker('https://api.example.com/health')?.state).toBe(
+      'CLOSED',
+    )
+  })
+
+  it('can opt back into origin-scoped breakers', async () => {
+    nock('https://api.example.com')
+      .get('/slow')
+      .reply(500, { ok: false })
+      .get('/health')
+      .reply(200, { ok: true })
+
+    const client = withSmartRetry(axios.create(), {
+      retry: { attempts: 0, strategy: 'fixed', baseDelay: 1 },
+      circuitBreaker: { threshold: 1, timeout: 500, volumeThreshold: 1 },
+      circuitKeyStrategy: 'origin',
+    })
+
+    await client.get('https://api.example.com/slow').catch(() => undefined)
+
+    await expect(client.get('https://api.example.com/health')).rejects.toBeInstanceOf(
+      CircuitBreakerOpenError,
+    )
+    expect(client.getCircuitBreaker('https://api.example.com')?.state).toBe('OPEN')
+  })
+
   it('does not create or update a breaker for successful requests with circuitBreakerConfig false', async () => {
     nock('https://api.example.com').get('/no-breaker').reply(200, { ok: true })
 
@@ -343,6 +386,45 @@ describe('withSmartRetry integration', () => {
     })
 
     expect(response.status).toBe(200)
-    expect(client.getCircuitBreaker('https://api.example.com')).toBeUndefined()
+    expect(client.getCircuitBreaker('https://api.example.com/no-breaker')).toBeUndefined()
+  })
+
+  it('supports rolling-window error-rate breakers', async () => {
+    nock('https://api.example.com')
+      .get('/error-rate')
+      .times(7)
+      .reply(200, { ok: true })
+      .get('/error-rate')
+      .times(3)
+      .reply(500, { ok: false })
+
+    const client = withSmartRetry(axios.create(), {
+      retry: { attempts: 0, strategy: 'fixed', baseDelay: 1 },
+      circuitBreaker: {
+        mode: 'error-rate',
+        volumeThreshold: 10,
+        errorRateThreshold: 0.3,
+        rollingWindowMs: 60_000,
+        timeout: 500,
+      },
+    })
+
+    for (let index = 0; index < 7; index += 1) {
+      await client.get('https://api.example.com/error-rate')
+    }
+
+    for (let index = 0; index < 3; index += 1) {
+      await client.get('https://api.example.com/error-rate').catch(() => undefined)
+    }
+
+    expect(
+      client.getCircuitBreaker('https://api.example.com/error-rate'),
+    ).toMatchObject({
+      state: 'OPEN',
+      mode: 'error-rate',
+      windowRequestCount: 10,
+      windowFailureCount: 3,
+      failureRate: 0.3,
+    })
   })
 })
